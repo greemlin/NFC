@@ -4,7 +4,7 @@ This guide will help you set up and run the EMV Card Reader application on Windo
 
 ## Prerequisites
 
-1. **Python 3.8 or higher**
+1. **Python 3.6 -  3.9 (preferred)
    - Download from [Python.org](https://www.python.org/downloads/)
    - During installation, make sure to check "Add Python to PATH"
    - Verify installation by opening Command Prompt and typing:
