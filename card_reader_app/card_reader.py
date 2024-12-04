@@ -3,14 +3,24 @@ import os
 import threading
 import time
 import queue
+import logging
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                            QLabel, QFrame, QTextEdit, QPlainTextEdit)
-from PyQt6.QtCore import Qt, QTimer, pyqtSlot
-from PyQt6.QtGui import QPixmap, QFont
+                            QLabel, QFrame, QTextEdit, QPlainTextEdit, QHBoxLayout,
+                            QPushButton, QGridLayout)
+from PyQt6.QtCore import Qt, QTimer, pyqtSlot, QSize
+from PyQt6.QtGui import QPixmap, QFont, QImage
+from PyQt6.QtMultimedia import (QCamera, QMediaCaptureSession, QVideoFrame, 
+                               QVideoSink, QMediaDevices)
+from PyQt6.QtMultimediaWidgets import QVideoWidget
 from smartcard.System import readers
 from smartcard.util import toHexString, toBytes
 from smartcard.Exceptions import NoCardException, CardConnectionException
 from datetime import datetime
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG,
+                   format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # EMV Tag Definitions
 EMV_TAGS = {
@@ -316,7 +326,7 @@ class CardReader:
             
             return f"{atr} ({' | '.join(atr_info)})"
         except Exception as e:
-            print(f"Error decoding ATR: {e}")
+            logger.error(f"Error decoding ATR: {e}")
             return atr
 
     def try_decode_unknown(self, value):
@@ -354,7 +364,7 @@ class CardReader:
             return f"HEX: {' '.join(hex_bytes)}"
                 
         except Exception as e:
-            print(f"Error in try_decode_unknown: {e}")
+            logger.error(f"Error in try_decode_unknown: {e}")
             return value
 
     def decode_emv_value(self, tag, value):
@@ -469,7 +479,7 @@ class CardReader:
             return f"{tag_name}: {value}"
             
         except Exception as e:
-            print(f"Error decoding tag {tag}: {str(e)}")
+            logger.error(f"Error decoding tag {tag}: {str(e)}")
             return f"Error decoding {tag}: {value}"
 
     def parse_tlv(self, hex_string, level=0):
@@ -525,7 +535,7 @@ class CardReader:
                     })
                 
             except Exception as e:
-                print(f"Error parsing TLV at position {i}: {str(e)}")
+                logger.error(f"Error parsing TLV at position {i}: {str(e)}")
                 break
         
         return tlv_data
@@ -593,7 +603,7 @@ class CardReader:
                                         'data': tlv_data
                                     })
                             elif sw1 != 0x6A and sw2 != 0x83:  # Skip "record not found" error
-                                print(f"Record read failed - SFI: {sfi}, Record: {record}, SW1: {hex(sw1)}, SW2: {hex(sw2)}")
+                                logger.error(f"Record read failed - SFI: {sfi}, Record: {record}, SW1: {hex(sw1)}, SW2: {hex(sw2)}")
 
                     # Try to read transaction log
                     log_entry = [0x00, 0xB2, 0x01, 0x5C, 0x00]  # Typical location for log entries
@@ -622,7 +632,7 @@ class CardReader:
                             })
 
         except Exception as e:
-            print(f"Error reading EMV data: {str(e)}")
+            logger.error(f"Error reading EMV data: {str(e)}")
 
         return data
 
@@ -709,7 +719,7 @@ class CardReader:
                 return "VISA"
 
         except Exception as e:
-            print(f"Error detecting card type: {str(e)}")
+            logger.error(f"Error detecting card type: {str(e)}")
         return None
 
     def send_apdu(self, connection, apdu):
@@ -718,20 +728,113 @@ class CardReader:
             response, sw1, sw2 = connection.transmit(apdu)
             return response, sw1, sw2
         except Exception as e:
-            print(f"Error sending APDU: {str(e)}")
+            logger.error(f"Error sending APDU: {str(e)}")
             return None, None, None
 
 class ModernFrame(QFrame):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Raised)
+    def __init__(self):
+        super().__init__()
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setFrameShadow(QFrame.Shadow.Raised)
         self.setStyleSheet("""
-            ModernFrame {
-                background-color: #ffffff;
-                border-radius: 10px;
-                border: 1px solid #e0e0e0;
+            QFrame {
+                background-color: #f0f0f0;
+                border: 1px solid #d0d0d0;
+                border-radius: 5px;
+                padding: 5px;
             }
         """)
+
+class CameraWidget(QWidget):
+    def __init__(self, camera_id, parent=None):
+        super().__init__(parent)
+        self.camera_id = camera_id
+        self.camera = None
+        self.capture_session = None
+        self.setup_ui()
+        logger.debug(f"Initialized CameraWidget with camera_id {camera_id}")
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        
+        # Create video widget
+        self.video_widget = QVideoWidget()
+        self.video_widget.setFixedSize(320, 240)
+        layout.addWidget(self.video_widget)
+        
+        # Create toggle button
+        self.toggle_button = QPushButton("Start Camera")
+        self.toggle_button.clicked.connect(self.toggle_camera)
+        layout.addWidget(self.toggle_button)
+        
+        self.setLayout(layout)
+        logger.debug("Camera widget UI setup complete")
+
+        # Initialize camera
+        self.initialize_camera()
+
+    def initialize_camera(self):
+        try:
+            # Get available cameras
+            available_cameras = QMediaDevices.videoInputs()
+            logger.debug(f"Available cameras: {len(available_cameras)}")
+            
+            if self.camera_id >= len(available_cameras):
+                logger.error(f"Camera {self.camera_id} not found")
+                self.toggle_button.setText("Camera Not Found")
+                self.toggle_button.setEnabled(False)
+                return
+                
+            # Create camera with the specific device
+            self.camera = QCamera(available_cameras[self.camera_id])
+            
+            # Create capture session
+            self.capture_session = QMediaCaptureSession()
+            self.capture_session.setCamera(self.camera)
+            
+            # Set up video output
+            self.capture_session.setVideoOutput(self.video_widget)
+            
+            logger.debug(f"Camera {self.camera_id} initialized successfully")
+            
+        except Exception as e:
+            logger.error(f"Error initializing camera {self.camera_id}: {str(e)}")
+            self.toggle_button.setText("Camera Error")
+            self.toggle_button.setEnabled(False)
+
+    def toggle_camera(self):
+        if self.camera is None:
+            return
+            
+        if self.camera.isActive():
+            self.stop_camera()
+        else:
+            self.start_camera()
+
+    def start_camera(self):
+        try:
+            if self.camera:
+                self.camera.start()
+                self.toggle_button.setText("Stop Camera")
+                logger.debug(f"Started camera {self.camera_id}")
+        except Exception as e:
+            logger.error(f"Error starting camera {self.camera_id}: {str(e)}")
+            self.toggle_button.setText("Camera Error")
+            self.toggle_button.setEnabled(False)
+
+    def stop_camera(self):
+        try:
+            if self.camera:
+                self.camera.stop()
+                self.toggle_button.setText("Start Camera")
+                logger.debug(f"Stopped camera {self.camera_id}")
+        except Exception as e:
+            logger.error(f"Error stopping camera {self.camera_id}: {str(e)}")
+
+    def closeEvent(self, event):
+        logger.debug(f"Closing camera {self.camera_id}")
+        self.stop_camera()
+        super().closeEvent(event)
 
 class CardReaderApp(QMainWindow):
     def __init__(self):
@@ -739,6 +842,10 @@ class CardReaderApp(QMainWindow):
         self.message_queue = queue.Queue()
         self.running = True
         self.card_reader = CardReader()
+        self.left_camera = None
+        self.right_camera = None
+        
+        # Initialize UI
         self.init_ui()
         self.load_card_images()
         self.start_monitoring()
@@ -747,102 +854,91 @@ class CardReaderApp(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.process_messages)
         self.timer.start(100)
-        
+
     def init_ui(self):
-        """Initialize the user interface."""
-        self.setWindowTitle('Printec Payment Card Reader')
-        self.setStyleSheet("""
-            QMainWindow {
-                background-color: #f5f5f5;
-            }
-            QLabel {
-                color: #2c3e50;
-            }
-            QTextEdit {
-                background-color: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 5px;
-                padding: 10px;
-                font-family: 'Consolas', monospace;
-                font-size: 14px;
-                color: #2c3e50;
-            }
-        """)
+        self.setWindowTitle('Card Reader')
+        self.setStyleSheet("background-color: #f0f0f0;")
         
-        # Create main widget and layout
-        main_widget = QWidget()
-        self.setCentralWidget(main_widget)
-        layout = QVBoxLayout(main_widget)
-        layout.setSpacing(20)
-        layout.setContentsMargins(30, 30, 30, 30)
+        # Create central widget and main layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QVBoxLayout(central_widget)
         
-        # Top section (Header, Status, Image, Name)
-        top_widget = QWidget()
-        top_layout = QVBoxLayout(top_widget)
-        self.header_label = QLabel('Printec Payment Card Reader')
-        self.header_label.setFont(QFont('Segoe UI', 32, QFont.Weight.Bold))
-        self.header_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        top_layout.addWidget(self.header_label)
+        # Create horizontal layout for cameras and card display
+        display_layout = QHBoxLayout()
         
-        # Status
+        try:
+            # Left camera
+            self.left_camera = CameraWidget(0)
+            display_layout.addWidget(self.left_camera)
+        except Exception as e:
+            logger.error(f"Error initializing left camera: {str(e)}")
+            placeholder = QLabel("Camera 0 Unavailable")
+            placeholder.setFixedSize(320, 240)
+            placeholder.setStyleSheet("border: 1px solid #ccc; background-color: #000; color: white;")
+            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            display_layout.addWidget(placeholder)
+        
+        # Card info section (middle)
+        card_layout = QVBoxLayout()
+        
+        # Status frame
         status_frame = ModernFrame()
         status_layout = QVBoxLayout(status_frame)
-        self.status_label = QLabel('Waiting for Card...')
-        self.status_label.setFont(QFont('Segoe UI', 16))
+        self.status_label = QLabel("Waiting for card...")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_label.setFont(QFont('Arial', 12))
         status_layout.addWidget(self.status_label)
-        top_layout.addWidget(status_frame)
+        card_layout.addWidget(status_frame)
         
-        # Card Image (Centered)
+        # Card type frame
         card_frame = ModernFrame()
-        card_layout = QVBoxLayout(card_frame)
-        card_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        
+        card_layout_inner = QVBoxLayout(card_frame)
         self.card_image_label = QLabel()
         self.card_image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.card_image_label.setFixedSize(200, 200)
-        self.card_image_label.setStyleSheet("""
-            QLabel {
-                background-color: white;
-                border: 1px solid #e0e0e0;
-                border-radius: 5px;
-            }
-        """)
-        card_layout.addWidget(self.card_image_label)
-        top_layout.addWidget(card_frame)
+        self.card_image_label.setFixedSize(320, 240)
+        card_layout_inner.addWidget(self.card_image_label)
+        card_layout.addWidget(card_frame)
         
-        # Cardholder Name
-        cardholder_frame = ModernFrame()
-        cardholder_layout = QVBoxLayout(cardholder_frame)
-        self.cardholder_label = QLabel('')
-        self.cardholder_label.setFont(QFont('Segoe UI', 24, QFont.Weight.Bold))
-        self.cardholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        cardholder_layout.addWidget(self.cardholder_label)
-        top_layout.addWidget(cardholder_frame)
+        # Add card layout to display layout
+        display_layout.addLayout(card_layout)
         
-        layout.addWidget(top_widget)
+        try:
+            # Right camera
+            self.right_camera = CameraWidget(1)
+            display_layout.addWidget(self.right_camera)
+        except Exception as e:
+            logger.error(f"Error initializing right camera: {str(e)}")
+            placeholder = QLabel("Camera 1 Unavailable")
+            placeholder.setFixedSize(320, 240)
+            placeholder.setStyleSheet("border: 1px solid #ccc; background-color: #000; color: white;")
+            placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            display_layout.addWidget(placeholder)
         
-        # Card Data Display
-        data_frame = ModernFrame()
-        data_layout = QVBoxLayout(data_frame)
+        # Add display layout to main layout
+        main_layout.addLayout(display_layout)
         
-        data_header = QLabel('Decoded Card Data')
-        data_header.setFont(QFont('Segoe UI', 16, QFont.Weight.Bold))
-        data_header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        data_layout.addWidget(data_header)
+        # Card details section
+        details_frame = ModernFrame()
+        details_layout = QVBoxLayout(details_frame)
+        self.details_text = QPlainTextEdit()
+        self.details_text.setReadOnly(True)
+        self.details_text.setFont(QFont('Courier', 10))
+        details_layout.addWidget(self.details_text)
+        main_layout.addWidget(details_frame)
         
-        self.data_display = QPlainTextEdit()
-        self.data_display.setReadOnly(True)
-        self.data_display.setMinimumHeight(300)
-        self.data_display.setFont(QFont('Consolas', 12))
-        data_layout.addWidget(self.data_display)
-        
-        layout.addWidget(data_frame)
-        
-        # Set window size and position
-        self.resize(800, 900)
+        # Set window size and center it
+        self.setMinimumSize(1200, 800)
         self.center_window()
-        
+
+    def closeEvent(self, event):
+        self.running = False
+        if self.left_camera:
+            self.left_camera.stop_camera()
+        if self.right_camera:
+            self.right_camera.stop_camera()
+        event.accept()
+
     def center_window(self):
         """Center the window on the screen."""
         screen = QApplication.primaryScreen().geometry()
@@ -876,10 +972,7 @@ class CardReaderApp(QMainWindow):
                         else:
                             self.card_image_label.clear()
                         
-                        # Update cardholder name
-                        self.cardholder_label.setText(card_type)
-                        
-                        # Update card data display with decoded EMV data
+                        # Update card details display with decoded EMV data
                         display_text = f"Card Type: {card_type}\n"
                         display_text += f"ATR: {self.card_reader.decode_atr(atr)}\n\n"
                         
@@ -904,36 +997,36 @@ class CardReaderApp(QMainWindow):
                                     indent = "  " * tlv.get('level', 0)
                                     display_text += f"{indent}{tlv['decoded']}\n"
                         
-                        self.data_display.setPlainText(display_text)
+                        self.details_text.setPlainText(display_text)
                             
                 except queue.Empty:
                     break
                     
         except Exception as e:
-            print(f"Error processing messages: {e}")
+            logger.error(f"Error processing messages: {e}")
             
     def load_card_images(self):
         """Load and resize card brand images."""
         self.card_images = {}
         image_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'images')
-        print(f"Loading images from: {image_dir}")
+        logger.debug(f"Loading images from: {image_dir}")
         
         for brand in ['visa', 'mastercard']:
             try:
                 image_path = os.path.join(image_dir, f'{brand}.png')
-                print(f"Looking for {brand} image at: {image_path}")
+                logger.debug(f"Looking for {brand} image at: {image_path}")
                 if os.path.exists(image_path):
                     pixmap = QPixmap(image_path)
                     if not pixmap.isNull():
                         pixmap = pixmap.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                         self.card_images[brand] = pixmap
-                        print(f"Loaded {brand} image: {pixmap.width()}x{pixmap.height()}")
+                        logger.debug(f"Loaded {brand} image: {pixmap.width()}x{pixmap.height()}")
                     else:
-                        print(f"Failed to load {brand} image")
+                        logger.error(f"Failed to load {brand} image")
                 else:
-                    print(f"Image not found: {image_path}")
+                    logger.error(f"Image not found: {image_path}")
             except Exception as e:
-                print(f"Error loading {brand} image: {e}")
+                logger.error(f"Error loading {brand} image: {e}")
                 
     def start_monitoring(self):
         """Start the card monitoring thread."""
@@ -962,9 +1055,9 @@ class CardReaderApp(QMainWindow):
                     # Only process if it's a new card
                     if current_atr != last_atr:
                         last_atr = current_atr
-                        print(f"New card detected with ATR: {current_atr}")
+                        logger.debug(f"New card detected with ATR: {current_atr}")
                         card_type = self.card_reader.detect_card_type(connection)
-                        print(f"Detected card type: {card_type}")
+                        logger.debug(f"Detected card type: {card_type}")
                         
                         # Read EMV card data
                         card_data = self.card_reader.read_card_data(connection, card_type)
@@ -973,7 +1066,7 @@ class CardReaderApp(QMainWindow):
                         self.message_queue.put(('card', (card_type, current_atr, card_data)))
                         
                 except Exception as e:
-                    print(f"Error connecting to card: {str(e)}")
+                    logger.error(f"Error connecting to card: {str(e)}")
                     last_atr = None
                     if "No smart card inserted" in str(e):
                         self.message_queue.put(('status', 'Waiting for Card...'))
@@ -983,28 +1076,30 @@ class CardReaderApp(QMainWindow):
                 time.sleep(0.1)
                 
             except Exception as e:
-                print(f"Error in monitor_cards: {str(e)}")
+                logger.error(f"Error in monitor_cards: {str(e)}")
                 time.sleep(1)
                 
-    def closeEvent(self, event):
-        """Handle application closing."""
-        self.running = False
-        event.accept()
-
 def main():
     try:
+        logger.debug("Starting application")
+        
+        # Enable debug output for QCamera
+        os.environ['QT_DEBUG_PLUGINS'] = '1'
+        
         app = QApplication(sys.argv)
         
-        # Set application style
-        app.setStyle('Fusion')
+        # List available cameras
+        available_cameras = QMediaDevices.videoInputs()
+        logger.debug("Available cameras:")
+        for i, camera in enumerate(available_cameras):
+            logger.debug(f"Camera {i}: {camera.description()}")
         
-        # Create and show the main window
         window = CardReaderApp()
         window.show()
-        
+        logger.debug("Application window shown")
         sys.exit(app.exec())
     except Exception as e:
-        print(f"Fatal error: {e}")
+        logger.error(f"Error in main: {str(e)}", exc_info=True)
         sys.exit(1)
 
 if __name__ == '__main__':
