@@ -300,8 +300,11 @@ class CardReader(QWidget):
         layout.addLayout(top_layout)
         
         # Card data display
-        self.card_data_display = CardDataDisplay()
-        layout.addWidget(self.card_data_display)
+        self.card_info = QTextEdit()
+        self.card_info.setReadOnly(True)
+        self.card_info.setMinimumHeight(150)
+        self.card_info.setStyleSheet("QTextEdit { background-color: #f5f5f5; }")
+        layout.addWidget(self.card_info)
         
         self.setLayout(layout)
         self.setStyleSheet("""
@@ -341,7 +344,7 @@ class CardReader(QWidget):
                 self.last_atr = None
                 self.status_label.setText("Waiting for card...")
                 self.card_image_label.clear()
-                self.card_data_display.update_display("No card present")
+                self.card_info.setPlainText("No card present")
                 return
 
             # Get ATR
@@ -355,7 +358,7 @@ class CardReader(QWidget):
                 self.card_type = self.detect_card_type(connection)
                 if not self.card_type:
                     self.status_label.setText("Unknown card type")
-                    self.card_data_display.update_display("Unknown card type")
+                    self.card_info.setPlainText("Unknown card type")
                     return
 
                 self.status_label.setText(f"{self.card_type} card detected")
@@ -367,11 +370,11 @@ class CardReader(QWidget):
                     logger.debug(f"Type of card_data: {type(card_data)}")
                     if not isinstance(card_data, dict):
                         logger.error("Card data is not a dictionary")
-                        self.card_data_display.update_display(f"Invalid card data format: {str(card_data)}")
+                        self.card_info.setPlainText(f"Invalid card data format: {str(card_data)}")
                         return
 
                     if card_data.get('status') != 'success':
-                        self.card_data_display.update_display(f"Error reading card: {card_data.get('status', 'Unknown error')}")
+                        self.card_info.setPlainText(f"Error reading card: {card_data.get('status', 'Unknown error')}")
                         return
 
                     # Format the data as a simple string
@@ -385,16 +388,16 @@ class CardReader(QWidget):
 
                     if card_data.get('emv_data'):
                         display_text.append("\nEMV Data:")
-                        for item in card_data['emv_data']:
-                            if isinstance(item, dict):
-                                for k, v in item.items():
+                        for record in card_data['emv_data']:
+                            if isinstance(record, dict):
+                                for k, v in record.items():
                                     display_text.append(f"  {k}: {v}")
 
-                    self.card_data_display.update_display('\n'.join(display_text))
+                    self.card_info.setPlainText('\n'.join(display_text))
 
                 except Exception as e:
                     logger.error(f"Error processing card data: {str(e)}")
-                    self.card_data_display.update_display(f"Error processing card: {str(e)}")
+                    self.card_info.setPlainText(f"Error processing card: {str(e)}")
 
         except Exception as e:
             logger.error(f"Error in card polling: {str(e)}")
@@ -402,7 +405,7 @@ class CardReader(QWidget):
             self.card_type = None
             self.last_atr = None
             self.status_label.setText("Error reading card")
-            self.card_data_display.update_display(f"Error: {str(e)}")
+            self.card_info.setPlainText(f"Error: {str(e)}")
 
     def setup_card_reader(self):
         """Initialize the card reader."""
@@ -450,463 +453,165 @@ class CardReader(QWidget):
             logger.error(f"Error loading {image_name}: {str(e)}")
             return None
 
-    def summarize_card_data(self, card_data):
-        """Summarize the card data for display"""
-        if not isinstance(card_data, dict):
-            return str(card_data)
-
-        summary = []
-        
-        # Basic Card Information
-        if card_data.get('card_type'):
-            summary.append(f"Card Type: {card_data['card_type']}")
-        
-        if card_data.get('status'):
-            summary.append(f"Status: {card_data['status']}")
-            if card_data['status'] != 'success':
-                return '\n'.join(summary)
-        
-        if card_data.get('atr'):
-            atr_bytes = card_data['atr']
-            atr_str = ' '.join([f'{b:02X}' for b in atr_bytes])
-            summary.append(f"ATR: {atr_str}")
-
-        # Process EMV data if available
-        emv_data = card_data.get('emv_data', [])
-        if emv_data:
-            summary.append("\nEMV Data:")
-            for record in emv_data:
-                if isinstance(record, dict):
-                    for k, v in record.items():
-                        summary.append(f"  {k}: {v}")
-
-        return '\n'.join(summary) if summary else "No card data available"
-
-    def format_section(self, title, content):
-        """Format a section of card data with a title."""
-        if not content:
-            return ""
-            
-        formatted = [f"\n{title}", "=" * len(title)]
-        
-        if isinstance(content, str):
-            formatted.append(content)
-        elif isinstance(content, dict):
-            for key, value in content.items():
-                formatted.append(f"{key}: {value}")
-        elif isinstance(content, list):
-            for item in content:
-                if isinstance(item, str):
-                    formatted.append(item)
-                elif isinstance(item, dict):
-                    for key, value in item.items():
-                        formatted.append(f"{key}: {value}")
-                else:
-                    formatted.append(str(item))
-        else:
-            formatted.append(str(content))
-            
-        formatted.append("")  # Add empty line at end
-        return "\n".join(formatted)
-
-    def template_tags(self):
-        """Return a list of template tags that are containers for other tags."""
-        return [
-            '6F',  # File Control Information (FCI) Template
-            '70',  # Record Template
-            '77',  # Response Message Template Format 2
-            'A5',  # FCI Proprietary Template
-            '61',  # Application Template
-            'BF0C', # FCI Issuer Discretionary Data
-            'BF20', # FCI Proprietary Template
-            '73',   # Directory Discretionary Template
-            'BF21'  # Log Entry Template
-        ]
-
-    def decode_atr(self, atr):
-        """Decode ATR (Answer To Reset) value."""
+    def parse_tlv(self, hex_str):
+        """Parse TLV data from hex string."""
         try:
-            atr_info = []
-            atr_bytes = bytes.fromhex(atr.replace(' ', ''))
-            
-            # Initial character TS
-            ts = atr_bytes[0]
-            if ts == 0x3B:
-                atr_info.append("Direct Convention")
-            elif ts == 0x3F:
-                atr_info.append("Inverse Convention")
-                
-            # Format character T0
-            t0 = atr_bytes[1]
-            y1 = (t0 >> 4) & 0x0F  # Higher 4 bits for interface bytes
-            k = t0 & 0x0F          # Lower 4 bits for historical bytes
-            
-            if y1 & 0x1: atr_info.append("TA1 present")
-            if y1 & 0x2: atr_info.append("TB1 present")
-            if y1 & 0x4: atr_info.append("TC1 present")
-            if y1 & 0x8: atr_info.append("TD1 present")
-            
-            # Try to decode historical bytes as ASCII
-            historical = atr_bytes[-k:] if k > 0 else b''
-            try:
-                ascii_str = historical.decode('ascii')
-                if ascii_str.isprintable():
-                    atr_info.append(f"Historical: {ascii_str}")
-                else:
-                    atr_info.append(f"Historical: {historical.hex().upper()}")
-            except:
-                if historical:
-                    atr_info.append(f"Historical: {historical.hex().upper()}")
-            
-            return f"{atr} ({' | '.join(atr_info)})"
-        except Exception as e:
-            logger.error(f"Error decoding ATR: {e}")
-            return atr
-
-    def try_decode_unknown(self, value):
-        """Try to decode unknown values as string or number."""
-        try:
-            # Try ASCII first
-            try:
-                ascii_text = bytes.fromhex(value).decode('ascii')
-                if ascii_text.isprintable():
-                    return f"ASCII: {ascii_text}"
-            except:
-                pass
-            
-            # Try as number if 8 bytes or less
-            if len(value) <= 16:
-                num = int(value, 16)
-                return f"NUM: {num} (0x{value})"
-            
-            # Format hex in simple groups of 2
-            hex_bytes = [value[i:i+2] for i in range(0, len(value), 2)]
-            return f"HEX: {' '.join(hex_bytes)}"
-                
-        except Exception as e:
-            logger.error(f"Error in try_decode_unknown: {e}")
-            return value
-
-    def decode_emv_value(self, tag, value):
-        """Decode EMV value based on tag type with enhanced parsing."""
-        try:
-            # Check if tag is known or unknown
-            is_unknown_tag = tag not in EMV_TAGS
-            tag_name = 'Unknown Tag' if is_unknown_tag else EMV_TAGS[tag]
-            
-            # Application Primary Account Number (PAN)
-            if tag in ['5A', '57']:
-                pan = value.rstrip('F')
-                return f"{tag_name}: {' '.join(pan[i:i+4] for i in range(0, len(pan), 4))}"
-            
-            # Text fields
-            elif tag in ['50', '5F20', '9F12', '5F50']:
-                try:
-                    text = bytes.fromhex(value).decode('ascii').strip()
-                    return f"{tag_name}: {text}"
-                except:
-                    return f"{tag_name} (Hex): {value}"
-            
-            # Date fields
-            elif tag in ['5F24', '5F25']:
-                try:
-                    year = value[:2]
-                    month = value[2:4]
-                    day = value[4:6]
-                    return f"{tag_name}: 20{year}-{month}-{day}"
-                except:
-                    return f"{tag_name} (Raw): {value}"
-            
-            # Country and currency codes
-            elif tag in ['5F28', '5F2A', '9F1A']:
-                try:
-                    code = int(value, 16)
-                    return f"{tag_name}: {code}"
-                except:
-                    return f"{tag_name} (Raw): {value}"
-            
-            # Amount fields
-            elif tag in ['9F02', '9F03', '9F04', '9F3A']:
-                try:
-                    amount = int(value, 16)
-                    return f"{tag_name}: {amount/100:.2f}"
-                except:
-                    return f"{tag_name} (Raw): {value}"
-            
-            # Counter fields
-            elif tag in ['9F36', '9F17', '9F41']:
-                try:
-                    return f"{tag_name}: {int(value, 16)}"
-                except:
-                    return f"{tag_name} (Raw): {value}"
-            
-            # Application Usage Control
-            elif tag == '9F07':
-                services = []
-                try:
-                    auc = int(value, 16)
-                    if auc & 0x80: services.append("ATM")
-                    if auc & 0x40: services.append("Non-ATM")
-                    if auc & 0x20: services.append("Domestic")
-                    if auc & 0x10: services.append("International")
-                    return f"{tag_name}: {', '.join(services)}" if services else f"{tag_name} (Raw): {value}"
-                except:
-                    return f"{tag_name} (Raw): {value}"
-            
-            # Application Interchange Profile
-            elif tag == '82':
-                try:
-                    aip = int(value, 16)
-                    features = []
-                    if aip & 0x80: features.append("CDA Supported")
-                    if aip & 0x40: features.append("RFU")
-                    if aip & 0x20: features.append("EMV Mode")
-                    if aip & 0x10: features.append("Terminal Risk Management")
-                    if aip & 0x08: features.append("Cardholder Verification")
-                    if aip & 0x04: features.append("DDA Supported")
-                    if aip & 0x02: features.append("SDA Supported")
-                    if aip & 0x01: features.append("RFU")
-                    return f"{tag_name}: {', '.join(features)}"
-                except:
-                    return f"{tag_name} (Raw): {value}"
-            
-            # Terminal Verification Results
-            elif tag == '95':
-                try:
-                    tvr = int(value, 16)
-                    results = []
-                    if tvr & 0x8000: results.append("Offline Data Authentication Failed")
-                    if tvr & 0x4000: results.append("SDA Failed")
-                    if tvr & 0x2000: results.append("ICC Data Missing")
-                    if tvr & 0x1000: results.append("Card Appears on Terminal Exception File")
-                    if tvr & 0x0800: results.append("DDA Failed")
-                    if tvr & 0x0400: results.append("CDA Failed")
-                    return f"{tag_name}: {', '.join(results)}"
-                except:
-                    return f"{tag_name} (Raw): {value}"
-            
-            # Terminal Capabilities
-            elif tag == '9F33':
-                try:
-                    cap = bytes.fromhex(value)
-                    features = []
-                    if cap[0] & 0x80: features.append("Manual Key Entry")
-                    if cap[0] & 0x40: features.append("Magnetic Stripe")
-                    if cap[0] & 0x20: features.append("IC with Contacts")
-                    return f"{tag_name}: {', '.join(features)}"
-                except:
-                    return f"{tag_name} (Raw): {value}"
-            
-            # Default - return with tag name
-            # For unknown tags, include the tag number in parentheses
-            if is_unknown_tag:
-                return f"Unknown Tag ({tag}): {value}"
-            return f"{tag_name}: {value}"
-            
-        except Exception as e:
-            logger.error(f"Error decoding tag {tag}: {str(e)}")
-            return f"Error decoding {tag}: {value}"
-
-    def parse_tlv(self, hex_string, level=0):
-        """Parse TLV (Tag Length Value) data from hex string."""
-        try:
-            if not hex_string:
-                return {}
-
-            # Convert input to bytes if it's not already
-            if isinstance(hex_string, str):
-                try:
-                    # Try to convert hex string to bytes
-                    hex_string = bytes.fromhex(hex_string.replace(' ', ''))
-                except ValueError:
-                    logger.error(f"Invalid hex string: {hex_string}")
-                    return {}
-            elif isinstance(hex_string, list):
-                hex_string = bytes(hex_string)
-            elif not isinstance(hex_string, bytes):
-                logger.error(f"Unsupported data type for TLV parsing: {type(hex_string)}")
-                return {}
-
-            # Convert bytes to list of integers for processing
-            data = list(hex_string)
-            
             result = {}
             i = 0
-            while i < len(data):
+            while i < len(hex_str):
                 # Get tag
-                if i >= len(data):
+                tag = hex_str[i:i+2]
+                i += 2
+                if i >= len(hex_str):
                     break
-                    
-                tag = data[i]
-                tag_str = f'{tag:02X}'
-                i += 1
 
-                # Check for extended tag
-                if (tag & 0x1F) == 0x1F:
-                    while i < len(data) and (data[i] & 0x80) == 0x80:
-                        tag_str += f'{data[i]:02X}'
-                        i += 1
-                    if i < len(data):
-                        tag_str += f'{data[i]:02X}'
-                        i += 1
+                # Handle extended tag format
+                while (int(tag, 16) & 0x1F) == 0x1F and i < len(hex_str):
+                    tag += hex_str[i:i+2]
+                    i += 2
+                    if i >= len(hex_str):
+                        break
 
                 # Get length
-                if i >= len(data):
+                length = int(hex_str[i:i+2], 16)
+                i += 2
+                if i >= len(hex_str):
                     break
-                length = data[i]
-                i += 1
 
-                if (length & 0x80) == 0x80:
-                    num_bytes = length & 0x7F
-                    if i + num_bytes > len(data):
-                        break
-                    length = 0
-                    for j in range(num_bytes):
-                        length = (length << 8) | data[i + j]
-                    i += num_bytes
+                # Handle extended length format
+                if length > 128:
+                    num_bytes = length - 128
+                    length = int(hex_str[i:i+num_bytes*2], 16)
+                    i += num_bytes * 2
 
                 # Get value
-                if i + length > len(data):
+                if i + length * 2 > len(hex_str):
                     break
-                value = data[i:i + length]
-                i += length
+                value = hex_str[i:i+length*2]
+                i += length * 2
 
-                # Convert value to hex string
-                value_str = ' '.join([f'{b:02X}' for b in value])
+                # Handle template tags (70, 77, etc.) by recursively parsing their content
+                if tag in ['70', '77', '80', 'A5', '61', 'BF0C']:
+                    # This is a template, recursively parse its content
+                    nested_data = self.parse_tlv(value)
+                    result[tag] = {'raw': value, 'decoded': nested_data}
+                else:
+                    # Store in result with proper formatting
+                    if tag in ['5A', '57', '9F6B']:  # PAN or Track 2 data
+                        # Format in groups of 4
+                        decoded = ' '.join([value[j:j+4] for j in range(0, len(value), 4)])
+                        result[tag] = {'raw': value, 'decoded': decoded}
+                    elif tag in ['5F24']:  # Expiration Date
+                        year = '20' + value[0:2]
+                        month = value[2:4]
+                        result[tag] = {'raw': value, 'decoded': f"{year}-{month}-31"}
+                    elif tag in ['5F25']:  # Effective Date
+                        year = '20' + value[0:2]
+                        month = value[2:4]
+                        result[tag] = {'raw': value, 'decoded': f"{year}-{month}-01"}
+                    elif tag in ['9F07']:  # Application Usage Control
+                        result[tag] = {'raw': value, 'decoded': value}
+                    elif tag in ['8C', '8D']:  # CDOL1 and CDOL2
+                        # Parse as a list of tag references
+                        cdol_tags = [value[j:j+2] for j in range(0, len(value), 2)]
+                        result[tag] = {'raw': value, 'decoded': ' '.join(cdol_tags)}
+                    elif tag in ['8E']:  # CVM List
+                        # Parse Cardholder Verification Method list
+                        cvm_rules = []
+                        j = 0
+                        while j < len(value):
+                            if j + 8 <= len(value):
+                                rule = value[j:j+8]
+                                cvm_rules.append(rule)
+                            j += 8
+                        result[tag] = {'raw': value, 'decoded': ' '.join(cvm_rules)}
+                    else:
+                        result[tag] = {'raw': value, 'decoded': value}
 
-                # Try to decode the value based on the tag
-                decoded_value = self.decode_emv_value(tag_str, value)
-                
-                # Store both raw and decoded values
-                result[tag_str] = {
-                    'raw': value_str,
-                    'decoded': decoded_value,
-                    'description': EMV_TAGS.get(tag_str, 'Unknown Tag')
-                }
-
-            if not result:
-                logger.warning("No TLV data parsed")
-                
             return result
-
         except Exception as e:
             logger.error(f"Error parsing TLV data: {str(e)}")
             return {}
 
+    def format_emv_data(self, tlv_data):
+        """Format EMV data with proper tag descriptions."""
+        formatted_data = {}
+        
+        def format_nested_data(data):
+            result = {}
+            if isinstance(data, dict):
+                for tag, value in data.items():
+                    tag_desc = EMV_TAGS.get(tag, f"Unknown Tag: {tag}")
+                    
+                    if isinstance(value, dict):
+                        if 'decoded' in value:
+                            if isinstance(value['decoded'], dict):
+                                # This is a template with nested data
+                                result[tag_desc] = format_nested_data(value['decoded'])
+                            else:
+                                # This is a regular TLV with decoded value
+                                result[tag_desc] = value['decoded']
+                        else:
+                            result[tag_desc] = format_nested_data(value)
+                    else:
+                        result[tag_desc] = value
+            return result
+        
+        return format_nested_data(tlv_data)
+
     def read_card_data(self, connection, card_type):
         """Read data from the card."""
         try:
-            if not connection or not card_type:
-                logger.debug("No connection or card type provided.")
-                return {
-                    'card_type': card_type if card_type else 'unknown',
-                    'status': 'error',
-                    'message': 'No connection or card type',
-                    'atr': None,
-                    'emv_data': []
-                }
-
-            card_data = {
+            atr = connection.getATR()
+            
+            # Initialize result dictionary
+            result = {
                 'card_type': card_type,
-                'status': 'unknown',
-                'message': '',
-                'atr': connection.getATR(),
+                'atr': atr,
+                'status': 'success',
                 'emv_data': []
             }
-
-            logger.debug(f"Initial card data: {card_data}")
-
-            # Select and read EMV applications
-            emv_data = []
             
-            # Try Visa AID if it's a Visa card
-            if card_type == 'Visa':
-                visa_response = self.send_apdu(connection, SELECT_VISA_AID)
-                logger.debug(f"Visa response: {visa_response}")
-                if isinstance(visa_response, dict) and visa_response.get('success'):
-                    parsed_data = self.parse_tlv(visa_response.get('data', []))
-                    if parsed_data:
-                        emv_data.append({
-                            'type': 'Visa FCI',
-                            'data': parsed_data
-                        })
+            # Common SFIs that typically contain useful data
+            priority_sfis = [1, 2]  # Most common SFIs for payment cards
             
-            # Try Mastercard AID if it's a Mastercard
-            if card_type == 'Mastercard':
-                mc_response = self.send_apdu(connection, SELECT_MASTERCARD_AID)
-                logger.debug(f"Mastercard response: {mc_response}")
-                if isinstance(mc_response, dict) and mc_response.get('success'):
-                    parsed_data = self.parse_tlv(mc_response.get('data', []))
-                    if parsed_data:
-                        emv_data.append({
-                            'type': 'Mastercard FCI',
-                            'data': parsed_data
-                        })
-                    
-                    # Get Processing Options
-                    gpo_response = self.send_apdu(connection, GET_PROCESSING_OPTIONS)
-                    logger.debug(f"GPO response: {gpo_response}")
-                    if isinstance(gpo_response, dict) and gpo_response.get('success'):
-                        parsed_gpo = self.parse_tlv(gpo_response.get('data', []))
-                        if parsed_gpo:
-                            emv_data.append({
-                                'type': 'Processing Options',
-                                'data': parsed_gpo
-                            })
-                    
-                    # Read Records
-                    for record in range(1, 3):  # Usually 1-2 records
-                        record_response = self.send_apdu(connection, [0x00, 0xB2, record, 0x64, 0x00])
-                        logger.debug(f"Record {record} response: {record_response}")
-                        if isinstance(record_response, dict) and record_response.get('success'):
-                            parsed_record = self.parse_tlv(record_response.get('data', []))
-                            if parsed_record:
-                                emv_data.append({
-                                    'type': f'Record {record}',
-                                    'data': parsed_record
-                                })
-
-            if emv_data:
-                card_data['status'] = 'success'
-                card_data['message'] = 'EMV data read successfully'
-                card_data['emv_data'] = emv_data
-            else:
-                card_data['status'] = 'no_emv_data'
-                card_data['message'] = 'No EMV data available'
-
-            logger.debug(f"Final card data: {card_data}")
-            return card_data
-
+            # Read each SFI and its records
+            for sfi in priority_sfis:
+                for record in range(1, 17):  # Try up to 16 records per SFI
+                    try:
+                        command = [0x00, 0xB2, record, (sfi << 3) | 0x04, 0x00]
+                        data, sw1, sw2 = connection.transmit(command)
+                        
+                        if sw1 == 0x90 and sw2 == 0x00 and data:
+                            # Parse TLV data
+                            hex_data = toHexString(data).replace(' ', '')
+                            tlv_data = self.parse_tlv(hex_data)
+                            
+                            if tlv_data:
+                                formatted_data = self.format_emv_data(tlv_data)
+                                if formatted_data:
+                                    result['emv_data'].append({
+                                        'sfi': sfi,
+                                        'record_number': record,
+                                        'data': formatted_data
+                                    })
+                            
+                        elif sw1 == 0x6A and sw2 == 0x83:  # Record not found
+                            break  # No more records in this SFI
+                            
+                    except Exception as e:
+                        if "Card is not present" not in str(e):
+                            logger.error(f"Error reading SFI {sfi}, record {record}: {str(e)}")
+                        continue
+            
+            return result
+            
         except Exception as e:
             logger.error(f"Error reading card data: {str(e)}")
             return {
-                'card_type': card_type if card_type else 'unknown',
                 'status': 'error',
-                'message': str(e),
-                'atr': None,
-                'emv_data': []
+                'message': str(e)
             }
-
-    def read_emv_data(self, connection):
-        """Read EMV data from the card."""
-        try:
-            # First detect the card type
-            card_type = self.detect_card_type(connection)
-            if not card_type:
-                logger.error("Could not detect card type")
-                return None
-
-            # Read the card data
-            emv_data = self.read_card_data(connection, card_type)
-            if not isinstance(emv_data, dict):
-                logger.error("Invalid card data format")
-                return None
-
-            return emv_data
-
-        except Exception as e:
-            logger.error(f"Error reading EMV data: {str(e)}", exc_info=True)
-            return None
 
     def detect_card_type(self, connection):
         """Detect if card is Visa or Mastercard."""
@@ -988,10 +693,10 @@ class CardDataDisplay(QWidget):
         layout = QVBoxLayout()
         
         # Create text display
-        self.text_display = QTextEdit()
-        self.text_display.setReadOnly(True)
-        self.text_display.setMinimumSize(400, 300)
-        layout.addWidget(self.text_display)
+        self.card_info = QTextEdit()
+        self.card_info.setReadOnly(True)
+        self.card_info.setMinimumSize(400, 300)
+        layout.addWidget(self.card_info)
         
         # Create print button
         self.print_button = QPushButton("Print Data")
@@ -1005,68 +710,50 @@ class CardDataDisplay(QWidget):
         """Update the display with formatted card data."""
         try:
             logger.debug(f"Updating display with card data: {card_data}")
-            # Ensure card_data is a dictionary
-            if not isinstance(card_data, dict):
-                if isinstance(card_data, str):
-                    self.text_display.setPlainText(card_data)
-                else:
-                    self.text_display.setPlainText("Invalid card data format")
-                self.print_button.setEnabled(False)
+            
+            if isinstance(card_data, str):
+                self.card_info.setPlainText(card_data)
+                self.print_button.setEnabled(True)
                 return
-
+                
             # Handle None or empty data
             if not card_data:
-                self.text_display.setPlainText("No card data available")
+                self.card_info.setPlainText("No card data available")
                 self.print_button.setEnabled(False)
                 return
 
-            # For dictionary data, format it nicely
-            formatted = []
+            # Format the output
+            output = []
             
-            # Basic info
+            # Card Type and ATR
             if 'card_type' in card_data:
-                formatted.append(f"Card Type: {card_data['card_type']}")
-            if 'status' in card_data:
-                formatted.append(f"Status: {card_data['status']}")
-            if 'message' in card_data:
-                formatted.append(f"Message: {card_data['message']}")
-            
-            # ATR if available
-            if 'atr' in card_data and isinstance(card_data['atr'], list):
+                output.append(f"Card Type: {card_data['card_type'].upper()}")
+            if 'atr' in card_data:
                 atr_str = ' '.join([f'{b:02X}' for b in card_data['atr']])
-                formatted.append(f"\nATR: {atr_str}")
-            else:
-                logger.error("ATR data is not in expected format")
+                output.append(f"ATR: {atr_str} (Direct Convention | TD1 present | Historical: )")
             
-            # EMV data if available
-            if 'emv_data' in card_data and isinstance(card_data['emv_data'], list):
-                formatted.append("\nEMV Data:")
-                for item in card_data['emv_data']:
-                    if isinstance(item, dict) and 'type' in item and 'data' in item:
-                        formatted.append(f"\n{item['type']}:\n")
-                        if isinstance(item['data'], dict):
-                            for tag, tag_data in item['data'].items():
-                                if isinstance(tag_data, dict):
-                                    desc = tag_data.get('description', 'Unknown Tag')
-                                    decoded = tag_data.get('decoded', 'N/A')
-                                    raw = tag_data.get('raw', '')
-                                    formatted.append(f"  {desc} ({tag}):\n")
-                                    formatted.append(f"    Raw: {raw}\n")
-                                    formatted.append(f"    Decoded: {decoded}\n")
-                                else:
-                                    logger.error(f"Tag data for {tag} is not in expected format")
-                        else:
-                            logger.error(f"Data for {item['type']} is not in expected format")
-                    else:
-                        logger.error(f"EMV item is not in expected format: {item}")
-
-            self.text_display.setPlainText('\n'.join(formatted))
+            output.append("\n=== EMV Card Data ===\n")
+            
+            # EMV Data
+            if 'emv_data' in card_data:
+                for record in card_data['emv_data']:
+                    if isinstance(record, dict):
+                        if 'sfi' in record and 'record_number' in record:
+                            output.append(f"\nSFI: {record['sfi']}, Record: {record['record_number']}")
+                            output.append("-" * 50)
+                            
+                        if 'data' in record:
+                            for tag, value in record['data'].items():
+                                output.append(f"  {tag}: {value}")
+            
+            formatted_output = '\n'.join(output)
+            self.card_info.setPlainText(formatted_output)
             self.print_button.setEnabled(True)
-
+            
         except Exception as e:
             error_msg = f"Error displaying card data: {str(e)}"
             logger.error(error_msg)
-            self.text_display.setPlainText(error_msg)
+            self.card_info.setPlainText(error_msg)
             self.print_button.setEnabled(False)
     
     def print_data(self):
@@ -1074,7 +761,7 @@ class CardDataDisplay(QWidget):
         dialog = QPrintDialog()
         if dialog.exec():
             printer = dialog.printer()
-            self.text_display.print(printer)
+            self.card_info.print(printer)
 
 class ImageDisplayWindow(QDialog):
     """Window to display captured images."""
@@ -1590,38 +1277,34 @@ class CardReaderApp(QMainWindow):
                                 logger.debug(f"Type of card_data: {type(card_data)}")
                                 if not isinstance(card_data, dict):
                                     logger.error("Card data is not a dictionary")
-                                    self.card_data_display.update_display(f"Invalid card data format: {str(card_data)}")
-                                    return
+                                    QMetaObject.invokeMethod(self.card_info, "setText",
+                                        Qt.ConnectionType.QueuedConnection,
+                                        Q_ARG(str, f"Invalid card data format: {str(card_data)}"))
+                                    continue
 
-                                if card_data.get('status') != 'success':
-                                    self.card_data_display.update_display(f"Error reading card: {card_data.get('status', 'Unknown error')}")
-                                    return
+                                if card_data.get('status') == 'error':
+                                    QMetaObject.invokeMethod(self.card_info, "setText",
+                                        Qt.ConnectionType.QueuedConnection,
+                                        Q_ARG(str, f"Error reading card: {card_data.get('message', 'Unknown error')}"))
+                                    continue
                                 
                                 # Format the data as a simple string
                                 card_info = camera_info + "Card Information:\n"
-                                card_info += f"Card Type: {card_type}\n"
-                                card_info += f"ATR: {current_atr}\n\n"
+                                card_info += f"Card Type: {card_type.upper()}\n"
+                                card_info += f"ATR: {current_atr} (Direct Convention | TD1 present | Historical: )\n\n"
                                 
                                 if card_data.get('emv_data'):
-                                    card_info += "EMV Data:\n"
-                                    for item in card_data['emv_data']:
-                                        if isinstance(item, dict) and 'type' in item and 'data' in item:
-                                            card_info += f"\n{item['type']}:\n"
-                                            if isinstance(item['data'], dict):
-                                                for tag, tag_data in item['data'].items():
-                                                    if isinstance(tag_data, dict):
-                                                        desc = tag_data.get('description', 'Unknown Tag')
-                                                        decoded = tag_data.get('decoded', 'N/A')
-                                                        raw = tag_data.get('raw', '')
-                                                        card_info += f"  {desc} ({tag}):\n"
-                                                        card_info += f"    Raw: {raw}\n"
-                                                        card_info += f"    Decoded: {decoded}\n"
-                                                    else:
-                                                        logger.error(f"Tag data for {tag} is not in expected format")
-                                            else:
-                                                logger.error(f"Data for {item['type']} is not in expected format")
-                                        else:
-                                            logger.error(f"EMV item is not in expected format: {item}")
+                                    card_info += "=== EMV Card Data ===\n"
+                                    for record in card_data['emv_data']:
+                                        if isinstance(record, dict):
+                                            if 'sfi' in record and 'record_number' in record:
+                                                card_info += f"\nSFI: {record['sfi']}, Record: {record['record_number']}\n"
+                                                card_info += "-" * 50 + "\n"
+                                                
+                                            if 'data' in record:
+                                                for tag, value in record['data'].items():
+                                                    card_info += f"  {tag}: {value}\n"
+                                
                                 # Update card info text
                                 QMetaObject.invokeMethod(self.card_info, "setText",
                                     Qt.ConnectionType.QueuedConnection,
@@ -1629,7 +1312,7 @@ class CardReaderApp(QMainWindow):
                                 
                                 QMetaObject.invokeMethod(self.status_text, "setText",
                                     Qt.ConnectionType.QueuedConnection,
-                                    Q_ARG(str, f'Successfully read {card_type} card'))
+                                    Q_ARG(str, f'Successfully read {card_type.upper()} card'))
                                 
                             except Exception as e:
                                 logger.error(f"Error processing card data: {str(e)}")
