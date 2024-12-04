@@ -367,7 +367,6 @@ class CardReader(QWidget):
                 # Read EMV data
                 try:
                     card_data = self.read_card_data(connection, self.card_type)
-                    logger.debug(f"Type of card_data: {type(card_data)}")
                     if not isinstance(card_data, dict):
                         logger.error("Card data is not a dictionary")
                         self.card_info.setPlainText(f"Invalid card data format: {str(card_data)}")
@@ -377,23 +376,47 @@ class CardReader(QWidget):
                         self.card_info.setPlainText(f"Error reading card: {card_data.get('status', 'Unknown error')}")
                         return
 
-                    # Format the data as a simple string
-                    display_text = []
-                    display_text.append(f"Card Type: {card_data.get('card_type', 'Unknown')}")
-                    display_text.append(f"Status: {card_data.get('status', 'Unknown')}")
+                    # Format the data
+                    output = []
+                    output.append("Card Information:")
+                    output.append(f"Card Type: {card_data.get('card_type', 'Unknown').upper()}")
                     
                     if card_data.get('atr'):
                         atr_str = ' '.join([f'{b:02X}' for b in card_data['atr']])
-                        display_text.append(f"ATR: {atr_str}")
+                        output.append(f"ATR: {atr_str}")
+
+                    output.append("\n=== EMV Card Data ===")
 
                     if card_data.get('emv_data'):
-                        display_text.append("\nEMV Data:")
                         for record in card_data['emv_data']:
                             if isinstance(record, dict):
-                                for k, v in record.items():
-                                    display_text.append(f"  {k}: {v}")
+                                if 'sfi' in record and 'record_number' in record:
+                                    output.append(f"\nSFI: {record['sfi']}, Record: {record['record_number']}")
+                                    output.append("-" * 50)
+                                    output.append("Record Template")
+                                    
+                                if 'data' in record:
+                                    for tag_desc, value in record['data'].items():
+                                        if tag_desc.startswith("Card Risk Management Data Object List"):  # CDOL1 and CDOL2
+                                            output.append(f"  {tag_desc}:")
+                                            cdol_tags = value.split()
+                                            for cdol_tag in cdol_tags:
+                                                if cdol_tag in EMV_TAGS:
+                                                    output.append(f"    • {EMV_TAGS[cdol_tag]}")
+                                        elif tag_desc.startswith("Cardholder Verification Method (CVM) List"):
+                                            output.append(f"  {tag_desc}:")
+                                            cvm_rules = value.split()
+                                            for i, rule in enumerate(cvm_rules, 1):
+                                                output.append(f"    • Rule {i}: {rule}")
+                                        else:
+                                            # Format long hex strings
+                                            if isinstance(value, str) and len(value) > 20 and all(c in '0123456789ABCDEF' for c in value):
+                                                formatted_value = ' '.join(value[i:i+4] for i in range(0, len(value), 4))
+                                            else:
+                                                formatted_value = value
+                                            output.append(f"  {tag_desc}: {formatted_value}")
 
-                    self.card_info.setPlainText('\n'.join(display_text))
+                    self.card_info.setPlainText('\n'.join(output))
 
                 except Exception as e:
                     logger.error(f"Error processing card data: {str(e)}")
@@ -494,27 +517,27 @@ class CardReader(QWidget):
                 if tag in ['70', '77', '80', 'A5', '61', 'BF0C']:
                     # This is a template, recursively parse its content
                     nested_data = self.parse_tlv(value)
-                    result[tag] = {'raw': value, 'decoded': nested_data}
+                    result[tag] = nested_data
                 else:
-                    # Store in result with proper formatting
+                    # Format the value based on tag type
                     if tag in ['5A', '57', '9F6B']:  # PAN or Track 2 data
-                        # Format in groups of 4
+                        # Format in groups of 4 for readability
                         decoded = ' '.join([value[j:j+4] for j in range(0, len(value), 4)])
-                        result[tag] = {'raw': value, 'decoded': decoded}
+                        result[tag] = decoded
                     elif tag in ['5F24']:  # Expiration Date
                         year = '20' + value[0:2]
                         month = value[2:4]
-                        result[tag] = {'raw': value, 'decoded': f"{year}-{month}-31"}
+                        result[tag] = f"{year}-{month}-31"
                     elif tag in ['5F25']:  # Effective Date
                         year = '20' + value[0:2]
                         month = value[2:4]
-                        result[tag] = {'raw': value, 'decoded': f"{year}-{month}-01"}
+                        result[tag] = f"{year}-{month}-01"
                     elif tag in ['9F07']:  # Application Usage Control
-                        result[tag] = {'raw': value, 'decoded': value}
+                        result[tag] = value
                     elif tag in ['8C', '8D']:  # CDOL1 and CDOL2
                         # Parse as a list of tag references
                         cdol_tags = [value[j:j+2] for j in range(0, len(value), 2)]
-                        result[tag] = {'raw': value, 'decoded': ' '.join(cdol_tags)}
+                        result[tag] = cdol_tags
                     elif tag in ['8E']:  # CVM List
                         # Parse Cardholder Verification Method list
                         cvm_rules = []
@@ -524,9 +547,15 @@ class CardReader(QWidget):
                                 rule = value[j:j+8]
                                 cvm_rules.append(rule)
                             j += 8
-                        result[tag] = {'raw': value, 'decoded': ' '.join(cvm_rules)}
+                        result[tag] = cvm_rules
+                    elif tag in ['9F0D', '9F0E', '9F0F']:  # IAC (Default, Denial, Online)
+                        result[tag] = value
                     else:
-                        result[tag] = {'raw': value, 'decoded': value}
+                        # For other tags, if it's a long hex string, format it in groups of 4
+                        if len(value) > 8:
+                            result[tag] = ' '.join([value[j:j+4] for j in range(0, len(value), 4)])
+                        else:
+                            result[tag] = value
 
             return result
         except Exception as e:
@@ -537,27 +566,36 @@ class CardReader(QWidget):
         """Format EMV data with proper tag descriptions."""
         formatted_data = {}
         
-        def format_nested_data(data):
-            result = {}
-            if isinstance(data, dict):
-                for tag, value in data.items():
-                    tag_desc = EMV_TAGS.get(tag, f"Unknown Tag: {tag}")
-                    
-                    if isinstance(value, dict):
-                        if 'decoded' in value:
-                            if isinstance(value['decoded'], dict):
-                                # This is a template with nested data
-                                result[tag_desc] = format_nested_data(value['decoded'])
-                            else:
-                                # This is a regular TLV with decoded value
-                                result[tag_desc] = value['decoded']
-                        else:
-                            result[tag_desc] = format_nested_data(value)
+        if isinstance(tlv_data, dict):
+            for tag, value in tlv_data.items():
+                tag_desc = EMV_TAGS.get(tag, f"Unknown Tag ({tag})")
+                
+                if isinstance(value, dict):
+                    # For template tags, merge their contents into the current level
+                    if tag in ['70', '77', '80', 'A5', '61', 'BF0C']:
+                        # This is a template, recursively parse its content
+                        inner_data = self.format_emv_data(value)
+                        formatted_data.update(inner_data)
                     else:
-                        result[tag_desc] = value
-            return result
+                        # This is a template, recursively format its content
+                        formatted_data[tag_desc] = self.format_emv_data(value)
+                elif isinstance(value, list):
+                    if tag in ['8C', '8D']:  # CDOL1 and CDOL2
+                        # Convert tag list to EMV tag descriptions
+                        tag_list = []
+                        for t in value:
+                            tag_name = EMV_TAGS.get(t)
+                            if tag_name:  # Only add known tags
+                                tag_list.append(tag_name)
+                        formatted_data[tag_desc] = tag_list
+                    elif tag == '8E':  # CVM List
+                        formatted_data[tag_desc] = value
+                    else:
+                        formatted_data[tag_desc] = value
+                else:
+                    formatted_data[tag_desc] = value
         
-        return format_nested_data(tlv_data)
+        return formatted_data
 
     def read_card_data(self, connection, card_type):
         """Read data from the card."""
@@ -730,9 +768,9 @@ class CardDataDisplay(QWidget):
                 output.append(f"Card Type: {card_data['card_type'].upper()}")
             if 'atr' in card_data:
                 atr_str = ' '.join([f'{b:02X}' for b in card_data['atr']])
-                output.append(f"ATR: {atr_str} (Direct Convention | TD1 present | Historical: )")
+                output.append(f"ATR: {atr_str}")
             
-            output.append("\n=== EMV Card Data ===\n")
+            output.append("\n=== EMV Card Data ===")
             
             # EMV Data
             if 'emv_data' in card_data:
@@ -741,10 +779,40 @@ class CardDataDisplay(QWidget):
                         if 'sfi' in record and 'record_number' in record:
                             output.append(f"\nSFI: {record['sfi']}, Record: {record['record_number']}")
                             output.append("-" * 50)
+                            output.append("Record Template")
                             
                         if 'data' in record:
                             for tag, value in record['data'].items():
-                                output.append(f"  {tag}: {value}")
+                                tag_desc = EMV_TAGS.get(tag, f"Unknown Tag ({tag})")
+                                
+                                if isinstance(value, dict) and 'decoded' in value:
+                                    decoded_value = value['decoded']
+                                    
+                                    if tag in ['8C', '8D']:  # CDOL1 and CDOL2
+                                        output.append(f"  {tag_desc}:")
+                                        cdol_tags = [decoded_value[i:i+2] for i in range(0, len(decoded_value), 2)]
+                                        for cdol_tag in cdol_tags:
+                                            if cdol_tag in EMV_TAGS:
+                                                output.append(f"    • {EMV_TAGS[cdol_tag]}")
+                                    elif tag == '8E':  # CVM List
+                                        output.append(f"  {tag_desc}:")
+                                        cvm_rules = decoded_value.split()
+                                        for i, rule in enumerate(cvm_rules, 1):
+                                            output.append(f"    • Rule {i}: {rule}")
+                                    else:
+                                        # Format long hex strings
+                                        if len(decoded_value) > 20 and all(c in '0123456789ABCDEF' for c in decoded_value):
+                                            formatted_value = ' '.join(decoded_value[i:i+4] for i in range(0, len(decoded_value), 4))
+                                        else:
+                                            formatted_value = decoded_value
+                                        output.append(f"  {tag_desc}: {formatted_value}")
+                                else:
+                                    # Format long hex strings
+                                    if isinstance(value, str) and len(value) > 20 and all(c in '0123456789ABCDEF' for c in value):
+                                        formatted_value = ' '.join(value[i:i+4] for i in range(0, len(value), 4))
+                                    else:
+                                        formatted_value = value
+                                    output.append(f"  {tag_desc}: {formatted_value}")
             
             formatted_output = '\n'.join(output)
             self.card_info.setPlainText(formatted_output)
@@ -1274,7 +1342,6 @@ class CardReaderApp(QMainWindow):
                             # Read and decode card data
                             try:
                                 card_data = card_reader.read_card_data(connection, card_type)
-                                logger.debug(f"Type of card_data: {type(card_data)}")
                                 if not isinstance(card_data, dict):
                                     logger.error("Card data is not a dictionary")
                                     QMetaObject.invokeMethod(self.card_info, "setText",
@@ -1288,53 +1355,61 @@ class CardReaderApp(QMainWindow):
                                         Q_ARG(str, f"Error reading card: {card_data.get('message', 'Unknown error')}"))
                                     continue
                                 
-                                # Format the data as a simple string
-                                card_info = camera_info + "Card Information:\n"
-                                card_info += f"Card Type: {card_type.upper()}\n"
-                                card_info += f"ATR: {current_atr} (Direct Convention | TD1 present | Historical: )\n\n"
+                                # Format the data
+                                output = []
+                                output.append(camera_info + "Card Information:")
+                                output.append(f"Card Type: {card_type.upper()}")
+                                output.append(f"ATR: {current_atr}")
                                 
                                 if card_data.get('emv_data'):
-                                    card_info += "=== EMV Card Data ===\n"
+                                    output.append("\n=== EMV Card Data ===")
                                     for record in card_data['emv_data']:
                                         if isinstance(record, dict):
                                             if 'sfi' in record and 'record_number' in record:
-                                                card_info += f"\nSFI: {record['sfi']}, Record: {record['record_number']}\n"
-                                                card_info += "-" * 50 + "\n"
+                                                output.append(f"\nSFI: {record['sfi']}, Record: {record['record_number']}")
+                                                output.append("-" * 50)
+                                                output.append("Record Template")
                                                 
                                             if 'data' in record:
-                                                for tag, value in record['data'].items():
-                                                    card_info += f"  {tag}: {value}\n"
-                                
+                                                data = record['data']
+                                                if isinstance(data, dict):
+                                                    for tag_desc, value in data.items():
+                                                        if isinstance(value, list):
+                                                            if tag_desc.startswith("Card Risk Management Data Object List"):  # CDOL1 and CDOL2
+                                                                output.append(f"  {tag_desc}:")
+                                                                for tag_name in value:
+                                                                    output.append(f"    • {tag_name}")
+                                                            elif tag_desc.startswith("Cardholder Verification Method (CVM) List"):
+                                                                output.append(f"  {tag_desc}:")
+                                                                for i, rule in enumerate(value, 1):
+                                                                    output.append(f"    • Rule {i}: {rule}")
+                                                            else:
+                                                                output.append(f"  {tag_desc}: {' '.join(value)}")
+                                                        else:
+                                                            output.append(f"  {tag_desc}: {value}")
+                                                    
                                 # Update card info text
                                 QMetaObject.invokeMethod(self.card_info, "setText",
                                     Qt.ConnectionType.QueuedConnection,
-                                    Q_ARG(str, card_info))
-                                
-                                QMetaObject.invokeMethod(self.status_text, "setText",
-                                    Qt.ConnectionType.QueuedConnection,
-                                    Q_ARG(str, f'Successfully read {card_type.upper()} card'))
+                                    Q_ARG(str, '\n'.join(output)))
                                 
                             except Exception as e:
                                 logger.error(f"Error processing card data: {str(e)}")
-                                error_info = camera_info + f"Card Information:\nCard Type: {card_type}\nError reading card data: {str(e)}"
                                 QMetaObject.invokeMethod(self.card_info, "setText",
                                     Qt.ConnectionType.QueuedConnection,
-                                    Q_ARG(str, error_info))
-                        else:
-                            QMetaObject.invokeMethod(self.status_text, "setText",
-                                Qt.ConnectionType.QueuedConnection,
-                                Q_ARG(str, 'Unknown card type'))
-                    
-                    time.sleep(1)  # Poll every second
+                                    Q_ARG(str, f"Error processing card: {str(e)}"))
+                                
+                    time.sleep(0.1)  # Small delay to prevent high CPU usage
                     
                 except Exception as e:
                     if "Card is not present" not in str(e):
                         logger.error(f"Error in card polling: {str(e)}")
-                    time.sleep(1)  # Wait before retrying
+                    time.sleep(0.1)
+                    continue
                     
         except Exception as e:
-            logger.error(f"Fatal error in polling thread: {str(e)}", exc_info=True)
-
+            logger.error(f"Fatal error in card polling thread: {str(e)}")
+            
 def main():
     try:
         logger.debug("Starting application")
