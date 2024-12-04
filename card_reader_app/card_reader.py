@@ -757,9 +757,10 @@ class CameraWidget(QWidget):
     def setup_ui(self):
         layout = QVBoxLayout()
         
-        # Create video widget
+        # Create video widget with a black background
         self.video_widget = QVideoWidget()
         self.video_widget.setFixedSize(320, 240)
+        self.video_widget.setStyleSheet("background-color: black;")
         layout.addWidget(self.video_widget)
         
         # Create toggle button
@@ -785,25 +786,41 @@ class CameraWidget(QWidget):
                 self.toggle_button.setEnabled(False)
                 return
                 
+            camera_device = available_cameras[self.camera_id]
+            logger.debug(f"Initializing camera {self.camera_id} - Description: {camera_device.description()}")
+            
+            # Log camera formats
+            formats = camera_device.videoFormats()
+            if formats:
+                for fmt in formats:
+                    logger.debug(f"Camera format - Resolution: {fmt.resolution().width()}x{fmt.resolution().height()}, "
+                               f"Framerate: {fmt.maxFrameRate()}")
+            
             # Create camera with the specific device
-            self.camera = QCamera(available_cameras[self.camera_id])
+            self.camera = QCamera(camera_device)
             
             # Create capture session
             self.capture_session = QMediaCaptureSession()
             self.capture_session.setCamera(self.camera)
-            
-            # Set up video output
             self.capture_session.setVideoOutput(self.video_widget)
+            
+            # Connect error signal
+            self.camera.errorOccurred.connect(self.handle_camera_error)
             
             logger.debug(f"Camera {self.camera_id} initialized successfully")
             
         except Exception as e:
-            logger.error(f"Error initializing camera {self.camera_id}: {str(e)}")
+            logger.error(f"Error initializing camera {self.camera_id}: {str(e)}", exc_info=True)
             self.toggle_button.setText("Camera Error")
             self.toggle_button.setEnabled(False)
 
+    def handle_camera_error(self, error, error_string):
+        logger.error(f"Camera {self.camera_id} error: {error} - {error_string}")
+        self.toggle_button.setText("Camera Error")
+
     def toggle_camera(self):
         if self.camera is None:
+            logger.error(f"Camera {self.camera_id} is None")
             return
             
         if self.camera.isActive():
@@ -814,22 +831,36 @@ class CameraWidget(QWidget):
     def start_camera(self):
         try:
             if self.camera:
+                logger.debug(f"Starting camera {self.camera_id}")
+                
+                # Set default format if available
+                formats = self.camera.cameraDevice().videoFormats()
+                if formats:
+                    default_format = formats[0]  # Use first available format
+                    self.camera.setCameraFormat(default_format)
+                    logger.debug(f"Set camera format - Resolution: {default_format.resolution().width()}x{default_format.resolution().height()}")
+                
                 self.camera.start()
-                self.toggle_button.setText("Stop Camera")
-                logger.debug(f"Started camera {self.camera_id}")
+                if self.camera.isActive():
+                    logger.debug(f"Camera {self.camera_id} started successfully")
+                    self.toggle_button.setText("Stop Camera")
+                else:
+                    logger.error(f"Camera {self.camera_id} failed to start")
+                    self.toggle_button.setText("Start Failed")
         except Exception as e:
-            logger.error(f"Error starting camera {self.camera_id}: {str(e)}")
+            logger.error(f"Error starting camera {self.camera_id}: {str(e)}", exc_info=True)
             self.toggle_button.setText("Camera Error")
             self.toggle_button.setEnabled(False)
 
     def stop_camera(self):
         try:
             if self.camera:
+                logger.debug(f"Stopping camera {self.camera_id}")
                 self.camera.stop()
                 self.toggle_button.setText("Start Camera")
                 logger.debug(f"Stopped camera {self.camera_id}")
         except Exception as e:
-            logger.error(f"Error stopping camera {self.camera_id}: {str(e)}")
+            logger.error(f"Error stopping camera {self.camera_id}: {str(e)}", exc_info=True)
 
     def closeEvent(self, event):
         logger.debug(f"Closing camera {self.camera_id}")
