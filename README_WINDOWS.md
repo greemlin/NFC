@@ -26,7 +26,7 @@ This guide will help you set up and run the EMV Card Reader application on Windo
 
 1. **Download the Project**
    ```
-   git clone https://github.com/greemlin/NFC.git
+   git clone https://github.com/greemlin/NFC.git/
    cd NFC
    ```
 
