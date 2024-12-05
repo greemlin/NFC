@@ -4,6 +4,7 @@ import threading
 import time
 import queue
 import logging
+import glob  # Add this import for checking V4L2 devices
 
 from PyQt6.QtCore import Qt, QTimer, QSize, QMetaObject, Q_ARG
 from PyQt6.QtGui import QImage, QPixmap
@@ -21,6 +22,9 @@ from smartcard.System import readers
 from smartcard.util import toHexString, toBytes
 from smartcard.Exceptions import NoCardException, CardConnectionException
 from datetime import datetime
+import cv2
+import platform
+import numpy as np
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG,
@@ -871,12 +875,13 @@ class CameraWidget(QWidget):
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
         
-        # Create video widget with a fixed size
-        self.video_widget = QVideoWidget()
-        self.video_widget.setMinimumSize(400, 300)
-        self.video_widget.setMaximumSize(400, 300)
-        self.video_widget.setStyleSheet("QVideoWidget { background-color: black; }")
-        layout.addWidget(self.video_widget)
+        # Create video label for displaying camera feed
+        self.video_label = QLabel()
+        self.video_label.setMinimumSize(400, 300)
+        self.video_label.setMaximumSize(400, 300)
+        self.video_label.setStyleSheet("QLabel { background-color: black; }")
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.video_label)
         
         # Create button layout
         button_layout = QHBoxLayout()
@@ -890,6 +895,7 @@ class CameraWidget(QWidget):
         # Create switch camera button
         self.switch_camera_button = QPushButton("Switch Camera")
         self.switch_camera_button.clicked.connect(self.switch_camera)
+        self.switch_camera_button.setEnabled(False)  # Disabled until we find multiple cameras
         button_layout.addWidget(self.switch_camera_button)
         
         # Create capture button
@@ -902,168 +908,276 @@ class CameraWidget(QWidget):
         layout.addLayout(button_layout)
         
         # Initialize camera-related variables
-        self.camera = None
-        self.capture_session = None
-        self.image_capture = None
-        self.video_sink = None
+        self.cap = None
         self.current_camera_id = 0
+        self.available_cameras = []  # List to store available camera indices
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_frame)
         
         # Set the layout
         self.setLayout(layout)
         
-        # Initialize camera with a delay to ensure proper initialization
+        # Initialize camera with a delay
         QTimer.singleShot(1000, self.initialize_camera)
 
-    def switch_camera(self):
-        """Switch between available cameras"""
-        cameras = QMediaDevices.videoInputs()
-        if not cameras:
-            return
-
-        # Stop current camera
-        self.stop_camera()
-
-        # Switch to next camera
-        self.current_camera_id = (self.current_camera_id + 1) % len(cameras)
-        logger.info(f"Switching to camera {self.current_camera_id}")
-
-        # Initialize new camera
-        self.initialize_camera()
-
-    def capture_photo(self):
-        """Capture a photo from the current camera"""
-        try:
-            if not self.image_capture:
-                logger.error("Image capture not initialized")
-                QMessageBox.warning(self, "Error", "Camera not properly initialized")
-                return
-            
-            if not self.camera or not self.camera.isActive():
-                logger.error("Camera not active")
-                QMessageBox.warning(self, "Error", "Camera not active")
-                return
-            
-            logger.debug("Attempting to capture photo...")
-            self.image_capture.capture()
-            
-        except Exception as e:
-            logger.error(f"Error capturing photo: {str(e)}", exc_info=True)
-            QMessageBox.critical(self, "Error", f"Failed to capture photo: {str(e)}")
-
     def initialize_camera(self):
-        """Initialize the camera with proper error handling."""
+        """Initialize the camera with OpenCV"""
         try:
-            # Get list of available cameras
-            cameras = QMediaDevices.videoInputs()
+            self.available_cameras = []  # Reset available cameras list
+            is_windows = platform.system() == 'Windows'
             
-            if not cameras:
-                logger.error("No cameras found!")
-                QMessageBox.warning(self, "Camera Error", "No cameras were detected on your system.")
+            logger.info("Scanning for cameras...")
+            
+            if is_windows:
+                # Windows camera detection code remains the same
+                for i in range(10):
+                    try:
+                        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+                        if cap.isOpened():
+                            ret, frame = cap.read()
+                            if ret and frame is not None and frame.size > 0:
+                                self.available_cameras.append(i)
+                                logger.info(f"Found camera at index {i} using DirectShow")
+                        cap.release()
+                    except Exception as e:
+                        logger.debug(f"Error checking Windows camera {i}: {str(e)}")
+            else:
+                # On Linux, check specific video devices
+                v4l2_devices = glob.glob('/dev/video*')
+                logger.info(f"Found V4L2 devices: {v4l2_devices}")
+                
+                # Only try the even-numbered devices (main video devices)
+                main_devices = sorted([d for d in v4l2_devices if int(d.replace('/dev/video', '')) % 2 == 0])
+                logger.info(f"Checking main devices: {main_devices}")
+                
+                for device in main_devices:
+                    try:
+                        dev_num = int(device.replace('/dev/video', ''))
+                        
+                        # Try opening with default backend first
+                        cap = cv2.VideoCapture(dev_num)
+                        if not cap.isOpened():
+                            cap = cv2.VideoCapture(dev_num, cv2.CAP_V4L2)
+                        
+                        if cap.isOpened():
+                            # Configure camera before reading
+                            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+                            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                            
+                            # Try to read a frame with timeout
+                            success = False
+                            start_time = time.time()
+                            while time.time() - start_time < 1:  # 1 second timeout
+                                ret, frame = cap.read()
+                                if ret and frame is not None and frame.size > 0:
+                                    success = True
+                                    break
+                                time.sleep(0.1)
+                            
+                            if success:
+                                self.available_cameras.append(dev_num)
+                                logger.info(f"Found working camera at {device}")
+                            cap.release()
+                    except Exception as e:
+                        logger.debug(f"Error checking Linux camera {device}: {str(e)}")
+            
+            if not self.available_cameras:
+                error_msg = "No working cameras found!"
+                if is_windows:
+                    error_msg += "\nPlease check:\n1. Camera is properly connected\n2. No other application is using the camera\n3. Camera drivers are installed"
+                else:
+                    error_msg += (f"\nPlease check:\n"
+                                f"1. Camera is connected\n"
+                                f"2. You have permission to access camera devices\n"
+                                f"3. Available V4L2 devices: {v4l2_devices}\n"
+                                f"4. Try: sudo chmod a+rw /dev/video*\n"
+                                f"5. Current user groups: {os.popen('groups').read().strip()}")
+                logger.error(error_msg)
+                QMessageBox.warning(self, "Camera Error", error_msg)
                 return
-
-            logger.info(f"Found {len(cameras)} camera(s)")
-            for i, camera in enumerate(cameras):
-                logger.info(f"Camera {i}: {camera.description()}")
-
-            # Create camera object
-            self.camera = QCamera(cameras[self.current_camera_id])
-            if not self.camera:
-                logger.error("Failed to create camera object")
-                return
-
-            # Set up error handling
-            self.camera.errorOccurred.connect(self.handle_camera_error)
-
-            # Create and configure capture session
-            self.capture_session = QMediaCaptureSession()
-            self.capture_session.setCamera(self.camera)
-            self.capture_session.setVideoOutput(self.video_widget)
-
-            # Set up image capture
-            self.image_capture = QImageCapture(self.camera)
-            self.image_capture.imageCaptured.connect(self.handle_image_captured)
-            self.image_capture.errorOccurred.connect(self.handle_capture_error)
-            self.capture_session.setImageCapture(self.image_capture)
-
-            # Start camera with error checking
+            
+            logger.info(f"Found {len(self.available_cameras)} working camera(s): {self.available_cameras}")
+            
+            # Enable switch camera button if we have multiple cameras
+            self.switch_camera_button.setEnabled(len(self.available_cameras) > 1)
+            
+            # Initialize the first available camera
+            self.current_camera_id = self.available_cameras[0]
             self.start_camera()
-
+            
         except Exception as e:
             logger.error(f"Camera initialization error: {str(e)}")
             QMessageBox.warning(self, "Camera Error", 
                               f"Failed to initialize camera: {str(e)}\n"
-                              "Please make sure your camera is properly connected and not in use by another application.")
+                              "Please make sure your camera is properly connected.")
+
+    def switch_camera(self):
+        """Switch to the next available camera"""
+        try:
+            if not self.available_cameras:
+                logger.warning("No cameras available to switch to")
+                return
+            
+            # Find the index of the current camera in our list
+            try:
+                current_idx = self.available_cameras.index(self.current_camera_id)
+                # Get the next camera in the list, wrapping around to the start if necessary
+                next_idx = (current_idx + 1) % len(self.available_cameras)
+                self.current_camera_id = self.available_cameras[next_idx]
+            except ValueError:
+                # If current camera isn't in the list, start with the first one
+                self.current_camera_id = self.available_cameras[0]
+            
+            logger.info(f"Switching to camera {self.current_camera_id}")
+            
+            # Stop the current camera and start the new one
+            self.stop_camera()
+            time.sleep(0.5)  # Give the camera time to properly close
+            self.start_camera()
+            
+        except Exception as e:
+            logger.error(f"Error switching camera: {str(e)}")
+            self.handle_camera_error(f"Failed to switch camera: {str(e)}")
 
     def start_camera(self):
-        """Start the camera with proper error handling"""
-        if not self.camera:
-            return
-
+        """Start the camera capture"""
         try:
-            self.camera.start()
-            # Add a short delay to check if camera started successfully
-            QTimer.singleShot(2000, self.check_camera_started)
-        except Exception as e:
-            logger.error(f"Failed to start camera: {str(e)}")
-            self.handle_camera_error(QCamera.Error.CameraError, str(e))
-
-    def check_camera_started(self):
-        """Check if the camera has started properly"""
-        if self.camera and self.camera.isActive():
+            if self.cap is not None:
+                self.cap.release()
+                self.cap = None
+                time.sleep(0.5)  # Give the camera time to properly close
+        
+            is_windows = platform.system() == 'Windows'
+        
+            # Try to open the camera with the appropriate backend
+            if is_windows:
+                self.cap = cv2.VideoCapture(self.current_camera_id, cv2.CAP_DSHOW)
+            else:
+                # Try default backend first
+                self.cap = cv2.VideoCapture(self.current_camera_id)
+                if not self.cap.isOpened():
+                    self.cap = cv2.VideoCapture(self.current_camera_id, cv2.CAP_V4L2)
+        
+            if not self.cap.isOpened():
+                raise RuntimeError(f"Failed to open camera {self.current_camera_id}")
+        
+            # Configure camera
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+            # Verify settings
+            actual_width = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+            actual_height = self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            logger.info(f"Camera {self.current_camera_id} resolution: {actual_width}x{actual_height}")
+        
+            # Read test frame with timeout
+            success = False
+            start_time = time.time()
+            while time.time() - start_time < 2:  # 2 second timeout
+                ret, frame = self.cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    success = True
+                    break
+                time.sleep(0.1)
+        
+            if not success:
+                raise RuntimeError(f"Camera {self.current_camera_id} opened but failed to capture test frame")
+        
+            # Start the timer with a slower frame rate
+            self.timer.start(100)  # Update every 100ms (10 fps) - more stable
+        
+            # Update button states
             self.toggle_button.setText("Stop Camera")
             self.capture_button.setEnabled(True)
-            logger.info("Camera started successfully")
-        else:
-            logger.error("Camera failed to start")
-            self.handle_camera_error(QCamera.Error.CameraError, "Camera failed to start properly")
+        
+            logger.info(f"Camera {self.current_camera_id} started successfully")
+        
+        except Exception as e:
+            logger.error(f"Failed to start camera: {str(e)}")
+            self.handle_camera_error(str(e))
+
+    def update_frame(self):
+        """Update the frame from camera"""
+        if self.cap is None or not self.cap.isOpened():
+            return
+        
+        try:
+            ret, frame = self.cap.read()
+            if ret:
+                # Convert BGR to RGB
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_frame.shape
+                bytes_per_line = ch * w
+                
+                # Create QImage from the frame
+                qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                pixmap = QPixmap.fromImage(qt_image)
+                
+                # Scale the image
+                scaled_pixmap = pixmap.scaled(
+                    self.video_label.size(),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                self.video_label.setPixmap(scaled_pixmap)
+        except Exception as e:
+            logger.error(f"Error in update_frame: {str(e)}")
+            self.stop_camera()
 
     def stop_camera(self):
-        """Stop the camera"""
-        if self.camera and self.camera.isActive():
-            self.camera.stop()
-            self.toggle_button.setText("Start Camera")
-            self.capture_button.setEnabled(False)
+        """Stop the camera capture"""
+        if self.timer:
+            self.timer.stop()
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
+        self.toggle_button.setText("Start Camera")
+        self.capture_button.setEnabled(False)
+        self.video_label.clear()
+        self.video_label.setStyleSheet("QLabel { background-color: black; }")
 
-    def handle_image_captured(self, id, image):
-        """Handle captured image"""
-        try:
-            logger.debug(f"Image captured with id: {id}")
-            
-            # Create and show the image display window
-            display_window = ImageDisplayWindow(image, self)
-            display_window.show()
+    def capture_photo(self):
+        """Capture a photo from the current camera"""
+        if self.cap is not None and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if ret:
+                # Convert to RGB for Qt
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb_frame.shape
+                bytes_per_line = ch * w
+                qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
                 
-        except Exception as e:
-            logger.error(f"Error handling captured image: {str(e)}", exc_info=True)
-            QMessageBox.critical(self, "Error", f"Error displaying photo: {str(e)}")
+                # Show the captured image in a new window
+                self.show_captured_image(qt_image)
 
-    def handle_capture_error(self, id, error, error_string):
-        """Handle image capture errors"""
-        logger.error(f"Capture error {id}: {error_string}")
-        QMessageBox.critical(self, "Capture Error", f"Failed to capture image: {error_string}")
+    def show_captured_image(self, image):
+        """Show the captured image in a new window"""
+        image_window = ImageDisplayWindow(image, self)
+        image_window.show()
 
     def toggle_camera(self):
         """Toggle camera on/off"""
-        try:
-            if self.camera and self.camera.isActive():
-                self.stop_camera()
-            else:
-                self.initialize_camera()
-                
-        except Exception as e:
-            logger.error(f"Error toggling camera: {str(e)}", exc_info=True)
-            self.handle_camera_error(-1, f"Failed to toggle camera: {str(e)}")
+        if self.cap is None or not self.cap.isOpened():
+            self.start_camera()
+        else:
+            self.stop_camera()
 
-    def handle_camera_error(self, error, error_string):
+    def handle_camera_error(self, error_string):
         """Handle camera errors"""
-        logger.error(f"Camera {self.current_camera_id} error: {error} - {error_string}")
-        self.toggle_button.setText("Camera Error")
-        self.capture_button.setEnabled(False)
-        
-        # Show error to user
-        QMessageBox.critical(self, "Camera Error", 
-                           f"Camera error occurred: {error_string}\n"
-                           "Please try restarting the camera or switching to a different camera.")
+        logger.error(f"Camera error: {error_string}")
+        QMessageBox.warning(self, "Camera Error", 
+                          f"Camera error occurred: {error_string}\n"
+                          "Please try restarting the application or reconnecting your camera.")
+        self.stop_camera()
+
+    def closeEvent(self, event):
+        """Clean up resources when widget is closed"""
+        self.stop_camera()
+        super().closeEvent(event)
 
 class CardReaderApp(QMainWindow):
     def __init__(self):
@@ -1240,7 +1354,7 @@ class CardReaderApp(QMainWindow):
                                 # Format the data
                                 output = []
                                 output.append(camera_info + "Card Information:")
-                                output.append(f"Card Type: {card_type.upper()}")
+                                output.append(f"Card Type: {card_data.get('card_type', 'Unknown').upper()}")
                                 output.append(f"ATR: {current_atr}")
                                 
                                 if card_data.get('emv_data'):
