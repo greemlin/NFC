@@ -911,30 +911,24 @@ class CameraWidget(QWidget):
         # Set the layout
         self.setLayout(layout)
         
-        # Initialize camera
-        QTimer.singleShot(100, self.initialize_camera)
+        # Initialize camera with a delay to ensure proper initialization
+        QTimer.singleShot(1000, self.initialize_camera)
 
     def switch_camera(self):
         """Switch between available cameras"""
-        try:
-            available_cameras = QMediaDevices().videoInputs()
-            if len(available_cameras) < 2:
-                QMessageBox.warning(self, "Warning", "No other cameras available")
-                return
-            
-            # Stop current camera
-            self.stop_camera()
-            
-            # Switch to next camera
-            self.current_camera_id = (self.current_camera_id + 1) % len(available_cameras)
-            
-            # Initialize new camera
-            self.initialize_camera()
-            
-            logger.debug(f"Switched to camera {self.current_camera_id}")
-        except Exception as e:
-            logger.error(f"Error switching camera: {str(e)}", exc_info=True)
-            QMessageBox.warning(self, "Error", "Failed to switch camera")
+        cameras = QMediaDevices.videoInputs()
+        if not cameras:
+            return
+
+        # Stop current camera
+        self.stop_camera()
+
+        # Switch to next camera
+        self.current_camera_id = (self.current_camera_id + 1) % len(cameras)
+        logger.info(f"Switching to camera {self.current_camera_id}")
+
+        # Initialize new camera
+        self.initialize_camera()
 
     def capture_photo(self):
         """Capture a photo from the current camera"""
@@ -959,188 +953,76 @@ class CameraWidget(QWidget):
     def initialize_camera(self):
         """Initialize the camera with proper error handling."""
         try:
-            # Get available cameras
-            available_cameras = QMediaDevices().videoInputs()
-            logger.info(f"Found {len(available_cameras)} camera(s)")
-            if not available_cameras:
-                logger.error("No cameras available")
-                self.handle_camera_error(-1, "No cameras available")
+            # Get list of available cameras
+            cameras = QMediaDevices.videoInputs()
+            
+            if not cameras:
+                logger.error("No cameras found!")
+                QMessageBox.warning(self, "Camera Error", "No cameras were detected on your system.")
                 return
 
-            # Stop any existing camera first
-            self.stop_camera()
-            
-            # Get the camera device
-            if self.current_camera_id >= len(available_cameras):
-                self.current_camera_id = 0
-            camera_device = available_cameras[self.current_camera_id]
-            logger.info(f"Initializing camera: {camera_device.description()}")
-            
-            # Create new camera instance
-            self.camera = QCamera(camera_device)
+            logger.info(f"Found {len(cameras)} camera(s)")
+            for i, camera in enumerate(cameras):
+                logger.info(f"Camera {i}: {camera.description()}")
+
+            # Create camera object
+            self.camera = QCamera(cameras[self.current_camera_id])
             if not self.camera:
-                raise RuntimeError("Failed to create camera instance")
+                logger.error("Failed to create camera object")
+                return
+
+            # Set up error handling
             self.camera.errorOccurred.connect(self.handle_camera_error)
-            
+
             # Create and configure capture session
             self.capture_session = QMediaCaptureSession()
-            if not self.capture_session:
-                raise RuntimeError("Failed to create capture session")
-            
-            # Configure camera format before setting it in the capture session
-            formats = camera_device.videoFormats()
-            if formats:
-                # Sort formats by resolution (width * height)
-                sorted_formats = sorted(formats, 
-                                     key=lambda f: f.resolution().width() * f.resolution().height())
-                
-                # Try to find an optimal format (prefer 640x480 or 1280x720)
-                selected_format = None
-                for fmt in sorted_formats:
-                    resolution = fmt.resolution()
-                    width = resolution.width()
-                    height = resolution.height()
-                    if ((width == 640 and height == 480) or 
-                        (width == 1280 and height == 720)):
-                        selected_format = fmt
-                        logger.info(f"Selected optimal format: {width}x{height}")
-                        break
-                
-                # If no optimal format found, use the middle resolution
-                if not selected_format and formats:
-                    selected_format = sorted_formats[len(sorted_formats)//2]
-                    resolution = selected_format.resolution()
-                    logger.info(f"Selected middle format: {resolution.width()}x{resolution.height()}")
-                
-                if selected_format:
-                    self.camera.setCameraFormat(selected_format)
-            
-            # Set up video widget
-            self.video_widget.setUpdatesEnabled(True)
-            self.video_widget.show()
-            self.video_widget.raise_()
-            
-            # Configure capture session
             self.capture_session.setCamera(self.camera)
             self.capture_session.setVideoOutput(self.video_widget)
-            
+
             # Set up image capture
             self.image_capture = QImageCapture(self.camera)
-            if not self.image_capture:
-                raise RuntimeError("Failed to create image capture")
             self.image_capture.imageCaptured.connect(self.handle_image_captured)
             self.image_capture.errorOccurred.connect(self.handle_capture_error)
             self.capture_session.setImageCapture(self.image_capture)
-            
-            # Log successful initialization
-            logger.info("Camera initialization completed successfully")
-            self.toggle_button.setText("Stop Camera")
-            
-            # Start camera automatically
-            QTimer.singleShot(100, self.start_camera)
-            
-        except Exception as e:
-            logger.error(f"Error initializing camera: {str(e)}", exc_info=True)
-            self.handle_camera_error(-1, f"Failed to initialize camera: {str(e)}")
-            
-    def start_camera(self):
-        """Start the camera"""
-        try:
-            if not self.camera:
-                logger.error("Cannot start: No camera initialized")
-                return
-                
-            if self.camera.isActive():
-                logger.debug("Camera is already active")
-                return
-                
-            logger.debug(f"Starting camera {self.current_camera_id}")
-            self.camera.start()
-            
-            # Update UI
-            self.toggle_button.setText("Stop Camera")
-            self.capture_button.setEnabled(True)
-            
-            # Verify camera started properly
-            QTimer.singleShot(1000, self.check_camera_started)
-            
-        except Exception as e:
-            logger.error(f"Error starting camera: {str(e)}", exc_info=True)
-            self.handle_camera_error(-1, f"Failed to start camera: {str(e)}")
 
-    def stop_camera(self):
-        """Stop the camera"""
-        try:
-            if not self.camera:
-                return
-                
-            logger.debug(f"Stopping camera {self.current_camera_id}")
-            
-            # First stop the camera if it's active
-            if self.camera.isActive():
-                self.camera.stop()
-            
-            # Clean up resources in the correct order
-            if self.image_capture:
-                try:
-                    self.image_capture.imageCaptured.disconnect()
-                    self.image_capture.errorOccurred.disconnect()
-                except:
-                    pass
-                self.image_capture = None
-            
-            if self.capture_session:
-                self.capture_session.setImageCapture(None)
-                self.capture_session.setVideoOutput(None)
-                self.capture_session.setCamera(None)
-                self.capture_session = None
-            
-            if self.camera:
-                try:
-                    self.camera.errorOccurred.disconnect()
-                except:
-                    pass
-                self.camera = None
-            
-            # Update UI
-            self.toggle_button.setText("Start Camera")
-            self.capture_button.setEnabled(False)
-            
-            # Clear video widget
-            if self.video_widget:
-                self.video_widget.update()
-                
+            # Start camera with error checking
+            self.start_camera()
+
         except Exception as e:
-            logger.error(f"Error stopping camera: {str(e)}", exc_info=True)
+            logger.error(f"Camera initialization error: {str(e)}")
+            QMessageBox.warning(self, "Camera Error", 
+                              f"Failed to initialize camera: {str(e)}\n"
+                              "Please make sure your camera is properly connected and not in use by another application.")
+
+    def start_camera(self):
+        """Start the camera with proper error handling"""
+        if not self.camera:
+            return
+
+        try:
+            self.camera.start()
+            # Add a short delay to check if camera started successfully
+            QTimer.singleShot(2000, self.check_camera_started)
+        except Exception as e:
+            logger.error(f"Failed to start camera: {str(e)}")
+            self.handle_camera_error(QCamera.Error.CameraError, str(e))
 
     def check_camera_started(self):
         """Check if the camera has started properly"""
-        try:
-            if not self.camera:
-                logger.error("No camera instance available")
-                return
-                
-            is_active = self.camera.isActive()
-            logger.debug(f"Camera active: {is_active}")
-            logger.debug(f"Video widget visible: {self.video_widget.isVisible()}")
-            logger.debug(f"Video widget size: {self.video_widget.size()}")
-            
-            if is_active:
-                # Verify capture session is properly configured
-                if (self.capture_session and 
-                    self.capture_session.camera() == self.camera and 
-                    self.image_capture):
-                    logger.info("Camera system initialized and running")
-                    return
-                    
-            # If we get here, something is wrong
-            logger.error("Camera system not properly initialized")
-            self.stop_camera()
-            self.handle_camera_error(-1, "Camera failed to initialize properly")
-            
-        except Exception as e:
-            logger.error(f"Error checking camera: {str(e)}", exc_info=True)
-            self.handle_camera_error(-1, f"Error checking camera: {str(e)}")
+        if self.camera and self.camera.isActive():
+            self.toggle_button.setText("Stop Camera")
+            self.capture_button.setEnabled(True)
+            logger.info("Camera started successfully")
+        else:
+            logger.error("Camera failed to start")
+            self.handle_camera_error(QCamera.Error.CameraError, "Camera failed to start properly")
+
+    def stop_camera(self):
+        """Stop the camera"""
+        if self.camera and self.camera.isActive():
+            self.camera.stop()
+            self.toggle_button.setText("Start Camera")
+            self.capture_button.setEnabled(False)
 
     def handle_image_captured(self, id, image):
         """Handle captured image"""
